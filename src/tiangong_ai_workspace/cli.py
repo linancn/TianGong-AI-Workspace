@@ -8,17 +8,22 @@ Edit this file to tailor the workspace to your own toolchain.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable, Tuple
+from typing import Any, Iterable, Mapping, Optional, Tuple
 
 import typer
 
 from . import __version__
+from .mcp_client import MCPToolClient
+from .secrets import MCPServerSecrets, discover_secrets_path, load_secrets
 
 app = typer.Typer(help="Tiangong AI Workspace CLI for managing local AI tooling.")
+mcp_app = typer.Typer(help="Interact with Model Context Protocol services configured for this workspace.")
+app.add_typer(mcp_app, name="mcp")
 
 # (command, label) pairs for CLI integrations that the workspace cares about.
 REGISTERED_TOOLS: Iterable[Tuple[str, str]] = (
@@ -101,6 +106,120 @@ def check() -> None:
 
     typer.echo("")
     typer.echo("Update src/tiangong_ai_workspace/cli.py to adjust tool detection rules.")
+
+
+# --------------------------------------------------------------------------- MCP
+
+
+def _load_mcp_configs() -> Mapping[str, MCPServerSecrets]:
+    try:
+        secrets = load_secrets()
+    except FileNotFoundError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=2)
+    if not secrets.mcp_servers:
+        secrets_path = discover_secrets_path()
+        message = f"""No MCP services configured in {secrets_path}. Populate a *_mcp section (see `.sercrets/secrets.example.toml`)."""
+        typer.secho(message, fg=typer.colors.YELLOW)
+        raise typer.Exit(code=3)
+    return secrets.mcp_servers
+
+
+@mcp_app.command("services")
+def list_mcp_services() -> None:
+    """List configured MCP services from the secrets file."""
+
+    configs = _load_mcp_configs()
+    typer.echo("Configured MCP services:")
+    for service in configs.values():
+        typer.echo(f"- {service.service_name} ({service.transport}) -> {service.url}")
+
+
+@mcp_app.command("tools")
+def list_mcp_tools(service_name: str) -> None:
+    """Enumerate tools exposed by a configured MCP service."""
+
+    configs = _load_mcp_configs()
+    if service_name not in configs:
+        available = ", ".join(sorted(configs)) or "none"
+        typer.secho(f"Service '{service_name}' not found. Available: {available}", fg=typer.colors.RED)
+        raise typer.Exit(code=4)
+
+    with MCPToolClient(configs) as client:
+        tools = client.list_tools(service_name)
+
+    if not tools:
+        typer.echo(f"No tools advertised by service '{service_name}'.")
+        return
+
+    typer.echo(f"Tools available on '{service_name}':")
+    for tool in tools:
+        description = getattr(tool, "description", "") or ""
+        if description:
+            typer.echo(f"- {tool.name}: {description}")
+        else:
+            typer.echo(f"- {tool.name}")
+
+
+@mcp_app.command("invoke")
+def invoke_mcp_tool(
+    service_name: str,
+    tool_name: str,
+    args: Optional[str] = typer.Option(None, "--args", "-a", help="JSON object with tool arguments."),
+    args_file: Optional[Path] = typer.Option(
+        None,
+        "--args-file",
+        path_type=Path,
+        help="Path to a JSON file containing tool arguments.",
+    ),
+) -> None:
+    """Invoke a tool exposed by a configured MCP service."""
+
+    if args and args_file:
+        typer.secho("Use either --args or --args-file, not both.", fg=typer.colors.RED)
+        raise typer.Exit(code=5)
+
+    payload: Mapping[str, Any] = {}
+    if args:
+        try:
+            payload = json.loads(args)
+        except json.JSONDecodeError as exc:
+            typer.secho(f"Invalid JSON for --args: {exc}", fg=typer.colors.RED)
+            raise typer.Exit(code=6) from exc
+    elif args_file:
+        try:
+            payload = json.loads(args_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            typer.secho(f"Invalid JSON in file {args_file}: {exc}", fg=typer.colors.RED)
+            raise typer.Exit(code=7) from exc
+        except OSError as exc:
+            typer.secho(f"Failed to read arguments file {args_file}: {exc}", fg=typer.colors.RED)
+            raise typer.Exit(code=8) from exc
+
+    configs = _load_mcp_configs()
+    if service_name not in configs:
+        available = ", ".join(sorted(configs)) or "none"
+        typer.secho(f"Service '{service_name}' not found. Available: {available}", fg=typer.colors.RED)
+        raise typer.Exit(code=9)
+
+    with MCPToolClient(configs) as client:
+        result, attachments = client.invoke_tool(service_name, tool_name, payload)
+
+    typer.echo("Tool result:")
+    typer.echo(_format_result(result))
+    if attachments:
+        typer.echo("\nAttachments:")
+        for attachment in attachments:
+            typer.echo(_format_result(attachment))
+
+
+def _format_result(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, indent=2, ensure_ascii=True)
+    except TypeError:
+        return repr(value)
 
 
 def main() -> None:

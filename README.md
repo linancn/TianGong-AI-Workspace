@@ -64,8 +64,16 @@ uv run tiangong-workspace tools     # 查看已配置的外部 CLI 列表
 
 ## 开发提示
 - 依赖管理：`uv add <package>` / `uv remove <package>`。
-- 代码格式：`uv run black src`、`uv run ruff check`.
+- 每次修改程序后，务必按以下顺序运行并全部通过：
+
+```bash
+uv run black .
+uv run ruff check
+uv run pytest
+```
+
 - 测试运行：`uv run pytest`（默认提供空测试环境，可按需添加用例）。
+- 更新代码的同时请同步维护 `AGENTS.md` 与 `README.md`，确保两者记录的信息始终与仓库状态一致。
 
 ## 许可证
 本项目采用 [MIT License](LICENSE)。

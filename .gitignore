@@ -153,3 +153,5 @@ pdfs
 .log
 
 uv.lock
+
+.sercrets/secrets.toml
